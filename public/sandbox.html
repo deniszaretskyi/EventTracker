@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Player Sandbox</title>
+    <style>
+      .replayer-mouse {
+        position: absolute;
+        width: 20px;
+        height: 20px;
+        background: red;
+        border-radius: 50%;
+        pointer-events: none;
+        transition: transform 0.05s linear;
+      }
+    </style>
+    <script>
+      let currentDOM = [];
+      const mouseCursor = document.createElement("div");
+      mouseCursor.className = "replayer-mouse";
+      document.body.appendChild(mouseCursor);
+
+      // renew DOM
+      function applyMutations(mutations) {
+        mutations.forEach((mutation) => {
+          switch (mutation.type) {
+            case "childList":
+              mutation.addedNodes.forEach((node) => {
+                document.body.appendChild(deserializeNode(node));
+              });
+              mutation.removedNodes.forEach((node) => {
+                document.body.removeChild(node);
+              });
+              break;
+            case "attributes":
+              const element = document.querySelector(
+                `[data-id="${mutation.target}"]`
+              );
+              if (element) {
+                element.setAttribute(mutation.attributeName, mutation.value);
+              }
+              break;
+          }
+        });
+      }
+
+      function deserializeNode(data) {
+        if (data.nodeType === Node.TEXT_NODE) {
+          return document.createTextNode(data.textContent);
+        }
+
+        const element = document.createElement(data.tagName);
+        data.attributes.forEach((attr) => {
+          element.setAttribute(attr.name, attr.value);
+        });
+
+        if (data.childNodes) {
+          data.childNodes.forEach((child) => {
+            element.appendChild(deserializeNode(child));
+          });
+        }
+
+        return element;
+      }
+
+      window.addEventListener("message", (e) => {
+        const event = e.data;
+        switch (event.type) {
+          case "snapshot":
+            currentDOM = event.data;
+            document.body.innerHTML = "";
+            currentDOM.forEach((node) => {
+              document.body.appendChild(deserializeNode(node));
+            });
+            break;
+          case "mutation":
+            applyMutations(event.mutations);
+            break;
+          case "mousemove":
+            mouseCursor.style.transform = `translate(${event.x}px, ${event.y}px)`;
+            break;
+        }
+      });
+    </script>
+  </head>
+  <body></body>
+</html>
