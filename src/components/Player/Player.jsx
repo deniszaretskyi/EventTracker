@@ -15,7 +15,7 @@ export const Player = ({ sessionId, autoPlay = false, initialData }) => {
   });
 
   const [loadingState, setLoadingState] = useState({
-    status: "idle", // 'idle' | 'loading' | 'ready' | 'error'
+    status: "idle",
     error: null,
   });
 
@@ -27,210 +27,148 @@ export const Player = ({ sessionId, autoPlay = false, initialData }) => {
   const containerRef = useRef(null);
   const initAttempts = useRef(0);
   const retryTimeout = useRef(null);
-  const domReconstructionTimeout = useRef(null);
 
-  // Sync play
   useEffect(() => {
     playbackStateRef.current = playbackState;
   }, [playbackState]);
 
-  // iframe init
   const initIframe = useCallback((dom) => {
-    const MAX_INIT_ATTEMPTS = 3;
+    const MAX_ATTEMPTS = 5;
+    const BASE_DELAY = 300;
     setLoadingState({ status: "loading", error: null });
 
-    const cleanupResources = () => {
+    const cleanup = () => {
       if (iframeRef.current) {
-        if (containerRef.current?.contains(iframeRef.current)) {
-          containerRef.current.removeChild(iframeRef.current);
-        }
+        containerRef.current?.removeChild(iframeRef.current);
         iframeRef.current = null;
       }
-      if (retryTimeout.current) {
-        clearTimeout(retryTimeout.current);
-      }
-      if (domReconstructionTimeout.current) {
-        clearTimeout(domReconstructionTimeout.current);
-      }
+      clearTimeout(retryTimeout.current);
     };
 
-    const initializeIframe = () => {
-      cleanupResources();
+    const initialize = () => {
+      cleanup();
       initAttempts.current = 0;
 
       try {
-        if (!containerRef.current) {
-          throw new Error("Player container not found");
-        }
+        if (!containerRef.current) throw new Error("Контейнер не найден");
 
-        // Create new iframe
         iframeRef.current = document.createElement("iframe");
         iframeRef.current.className = "session-iframe";
         iframeRef.current.sandbox = "allow-scripts";
-        iframeRef.current.style.visibility = "hidden";
-        iframeRef.current.style.width = "100%";
-        iframeRef.current.style.height = "100%";
-        iframeRef.current.style.border = "none";
+        iframeRef.current.style.cssText = `
+          visibility: hidden;
+          width: 100%;
+          height: 100%;
+          border: none;
+        `;
 
-        // error handler
-        iframeRef.current.onerror = () =>
-          handleIframeError("Error while loading iframe");
+        // Обработчики событий iframe
+        iframeRef.current.onload = () => handleIframeLoad(dom);
+        iframeRef.current.onerror = () => handleError("Ошибка загрузки iframe");
+
         containerRef.current.appendChild(iframeRef.current);
-
-        startReadinessCheck(dom);
       } catch (error) {
-        handleIframeError(error.message);
+        handleError(error.message);
       }
     };
 
-    const startReadinessCheck = (dom) => {
-      const checkReadyState = () => {
-        if (!iframeRef.current) return;
-
-        try {
-          const doc = iframeRef.current.contentDocument;
-          if (doc && doc.readyState === "complete") {
-            prepareIframeContent(doc, dom);
-          } else {
-            if (initAttempts.current < MAX_INIT_ATTEMPTS) {
-              initAttempts.current += 1;
-              retryTimeout.current = setTimeout(
-                checkReadyState,
-                100 * initAttempts.current
-              );
-            } else {
-              throw new Error("Iframe waiting time exceeded...");
-            }
-          }
-        } catch (error) {
-          handleIframeError(error.message);
-        }
-      };
-
-      checkReadyState();
-    };
-
-    const prepareIframeContent = (doc, dom) => {
+    const handleIframeLoad = (dom) => {
       try {
-        // Protection from invalid methods
-        if (typeof doc.open !== "function" || typeof doc.close !== "function") {
-          throw new Error("Incorrect doc type");
-        }
+        const doc = iframeRef.current.contentDocument;
+        if (!doc) throw new Error("Документ не доступен");
 
-        // create basic structure
         doc.open();
         doc.write(`
-            <!DOCTYPE html>
-            <html>
-              <head>
-                <meta charset="utf-8">
-                <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
-                <style>
-                  html, body { 
-                    margin: 0; 
-                    padding: 0;
-                    overflow: hidden;
-                    width: 100%;
-                    height: 100%;
-                  }
-                  .replayer-mouse {
-                    position: absolute;
-                    width: 15px;
-                    height: 15px;
-                    background: #ff0000;
-                    border-radius: 50%;
-                    pointer-events: none;
-                    transition: transform 0.05s linear;
-                    z-index: 9999;
-                    transform: translate(-50%, -50%);
-                  }
-                </style>
-              </head>
-              <body></body>
-            </html>
-          `);
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
+              <style>
+                html, body { margin: 0; overflow: hidden; width: 100%; height: 100%; }
+                .replayer-mouse {
+                  position: absolute;
+                  width: 15px;
+                  height: 15px;
+                  background: #ff0000;
+                  border-radius: 50%;
+                  pointer-events: none;
+                  transition: transform 0.05s linear;
+                  z-index: 9999;
+                }
+              </style>
+            </head>
+            <body></body>
+          </html>
+        `);
         doc.close();
 
-        // Dom reconstruction with timeout
-        domReconstructionTimeout.current = setTimeout(() => {
+        setTimeout(() => {
           if (doc.body) {
             rebuildDOM(dom, doc);
             iframeRef.current.style.visibility = "visible";
             setLoadingState({ status: "ready", error: null });
-            console.log("Dom reconstruction succesfull");
           }
-        }, 50);
+        }, 100);
       } catch (error) {
-        handleIframeError(`Content Error: ${error.message}`);
+        handleError(`Ошибка контента: ${error.message}`);
       }
     };
 
-    const handleIframeError = (message) => {
-      console.error("Ошибка iframe:", message);
-      setLoadingState({
-        status: "error",
-        error: message,
-      });
-      cleanupResources();
+    const handleError = (message) => {
+      if (initAttempts.current < MAX_ATTEMPTS) {
+        initAttempts.current += 1;
+        retryTimeout.current = setTimeout(
+          initialize,
+          BASE_DELAY * initAttempts.current
+        );
+      } else {
+        setLoadingState({ status: "error", error: message });
+        cleanup();
+      }
     };
 
-    initializeIframe();
+    initialize();
+
+    return cleanup;
   }, []);
 
-  // session data innit
   useEffect(() => {
-    if (initialData?.dom && initialData?.events?.length > 0) {
-      const validateEvents = () => {
-        const requiredFields = {
-          mousemove: ["x", "y"],
-          click: ["x", "y"],
-          mutation: ["mutations"],
-          scroll: ["scrollX", "scrollY"],
-        };
+    if (!initialData?.dom || !initialData?.events) return;
 
-        return initialData.events.every((event) => {
-          if (!event.type || typeof event.timestamp !== "number") return false;
+    // Валидация данных
+    const isValid = initialData.events.every(
+      (e) =>
+        e.timestamp !== undefined &&
+        ["mousemove", "click", "mutation"].includes(e.type) &&
+        (e.type !== "mousemove" ||
+          (typeof e.x === "number" && typeof e.y === "number"))
+    );
 
-          const fields = requiredFields[event.type] || [];
-          return fields.every((field) => event[field] !== undefined);
-        });
-      };
-
-      if (!validateEvents()) {
-        setLoadingState({
-          status: "error",
-          error: "Wrong session data format ",
-        });
-        return;
-      }
-
-      eventsQueue.current = [...initialData.events].sort(
-        (a, b) => a.timestamp - b.timestamp
-      );
-
-      setPlaybackState((prev) => ({
-        ...prev,
-        duration:
-          eventsQueue.current.length > 0
-            ? (eventsQueue.current[eventsQueue.current.length - 1].timestamp -
-                eventsQueue.current[0].timestamp) /
-              1000
-            : 0,
-        currentTime: 0,
-        isPlaying: false,
-      }));
-
-      initIframe(initialData.dom);
+    if (!isValid) {
+      setLoadingState({ status: "error", error: "Неверный формат данных" });
+      return;
     }
+
+    eventsQueue.current = [...initialData.events].sort(
+      (a, b) => a.timestamp - b.timestamp
+    );
+    setPlaybackState((prev) => ({
+      ...prev,
+      duration:
+        eventsQueue.current.length > 0
+          ? (eventsQueue.current.slice(-1)[0].timestamp -
+              eventsQueue.current[0].timestamp) /
+            1000
+          : 0,
+    }));
+
+    initIframe(initialData.dom);
 
     return () => {
       if (iframeRef.current) {
         containerRef.current?.removeChild(iframeRef.current);
         iframeRef.current = null;
       }
-      if (retryTimeout.current) clearTimeout(retryTimeout.current);
-      if (domReconstructionTimeout.current)
-        clearTimeout(domReconstructionTimeout.current);
     };
   }, [initialData, initIframe]);
 
