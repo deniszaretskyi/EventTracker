@@ -33,58 +33,18 @@ app.options("*", cors(corsOptions));
 app.use(express.json());
 app.use(express.raw({ type: "application/msgpack" }));
 
-// Demo Session Data
-const DEMO_SESSION = {
-  id: "demo",
-  created: new Date().toISOString(),
-  userAgent: "Demo User Agent",
-  events: [
-    {
-      type: "mousemove",
-      x: 100,
-      y: 100,
-      timestamp: Date.now() - 5000,
-    },
-    {
-      type: "click",
-      x: 200,
-      y: 200,
-      timestamp: Date.now() - 3000,
-    },
-  ],
-  dom: {
-    type: "element",
-    tag: "div",
-    attrs: {},
-    children: [
-      {
-        type: "element",
-        tag: "h1",
-        attrs: {},
-        children: [{ type: "#text", content: "Demo Session" }],
-      },
-      {
-        type: "element",
-        tag: "button",
-        attrs: {
-          class: "demo-button",
-        },
-        children: [{ type: "#text", content: "Click Me" }],
-      },
-    ],
-  },
-};
-
 // Endpoints
 app.post("/api/record", (req, res) => {
   try {
     const sessionId = crypto.randomUUID();
     let data;
+    console.log("[/api/record] raw req.body length:", req.body?.length);
 
     // decode
     if (req.headers["content-type"] === "application/msgpack") {
       try {
         data = decode(new Uint8Array(req.body));
+        console.log("[/api/record] Decoded data:", data);
       } catch (e) {
         return res.status(400).json({ error: "Invalid MessagePack format" });
       }
@@ -111,6 +71,10 @@ app.post("/api/record", (req, res) => {
       });
     }
 
+    if (!data.sessionId) {
+      return res.status(400).json({ error: "No sessionId" });
+    }
+
     // Session saving
     const session = {
       id: sessionId,
@@ -129,31 +93,19 @@ app.post("/api/record", (req, res) => {
   }
 });
 
+app.get("/api/sessions", (req, res) => {
+  // sessions - это Map
+  const allKeys = Array.from(sessions.keys());
+  res.json(allKeys);
+});
+
 app.get("/api/sessions/:id", (req, res) => {
-  try {
-    if (req.params.id === "demo") {
-      if (req.headers.accept === "application/msgpack") {
-        const encoded = encode(DEMO_SESSION);
-        return res.type("application/msgpack").send(encoded);
-      }
-      return res.json(DEMO_SESSION);
-    }
-
-    const session = sessions.get(req.params.id);
-    if (!session) {
-      return res.status(404).json({ error: "Session not found" });
-    }
-
-    if (req.headers.accept === "application/msgpack") {
-      const encoded = encode(session);
-      return res.type("application/msgpack").send(encoded);
-    }
-
-    res.json(session);
-  } catch (error) {
-    console.error("Session fetch error:", error);
-    res.status(500).json({ error: "Internal server error" });
+  const sessionId = req.params.id;
+  const sessionData = sessions.get(sessionId);
+  if (!sessionData) {
+    return res.status(404).json({ error: "Session not found" });
   }
+  res.json(sessionData);
 });
 
 const PORT = 3001;
@@ -163,6 +115,6 @@ app.listen(PORT, () => {
    Endpoints:
   - POST /api/record - new session recorder
   - GET /api/sessions/:id - get session
-  - DEMO: http://localhost:${PORT}/api/sessions/demo
+  - GEt /api/sessions - get session list
   `);
 });

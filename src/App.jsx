@@ -1,115 +1,75 @@
-import { useState, useEffect } from "react";
-import { Player } from "./components/Player/Player";
-import { Recorder } from "./recorder/useRecorder";
-
-const DEMO_SESSION_ID = "demo";
+import { useEffect, useState } from "react";
+import RecorderButton from "./components/RecorderButton";
+import SessionSelector from "./components/SessionSelector";
+import Player from "./components/Player/Player";
 
 export default function App() {
-  const [demoState, setDemoState] = useState({
-    isLoaded: false,
-    error: null,
-    data: null,
-  });
+  const [sessions, setSessions] = useState([]);
+  const [currentSession, setCurrentSession] = useState(null);
 
-  const loadSession = async (sessionId) => {
+  // Fetch the list of sessions on mount
+  useEffect(() => {
+    fetch("http://localhost:3001/api/sessions")
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Failed to fetch sessions list: ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        console.log("[App] Sessions loaded:", data);
+        if (Array.isArray(data)) setSessions(data);
+      })
+      .catch((err) => console.error("Error fetching sessions list:", err));
+  }, []);
+
+  const handleSessionSelect = async (sessionId) => {
+    console.log("[App] Selected session:", sessionId);
+    if (!sessionId) return;
+
     try {
-      const response = await fetch(
+      const res = await fetch(
         `http://localhost:3001/api/sessions/${sessionId}`
       );
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP Error: ${errorText}`);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch session ${sessionId}: ${res.status}`);
       }
-
-      const data = await response.json();
-
-      // data structure validation
-      if (!data?.dom || !data?.events) {
-        throw new Error("Invalid session data structure from server");
+      const data = await res.json();
+      if (!data || !Array.isArray(data.events) || !data.domSnapshot) {
+        console.error("Invalid session data:", data);
+        return;
       }
-
-      return data;
+      setCurrentSession(data);
+      console.log(
+        `[App] Loaded session ${sessionId} with ${data.events.length} events`
+      );
     } catch (error) {
-      console.error("Session load failed:", error);
-      throw error;
+      console.error("Error fetching session data:", error);
     }
   };
 
-  useEffect(() => {
-    const loadDemo = async () => {
-      try {
-        const data = await loadSession(DEMO_SESSION_ID);
-
-        setDemoState({
-          isLoaded: true,
-          error: null,
-          data,
-        });
-      } catch (error) {
-        setDemoState({
-          isLoaded: false,
-          error: error.message,
-          data: null,
-        });
-      }
-    };
-
-    loadDemo();
-  }, []);
-
   return (
-    <div className="homepage">
-      <h1>Player</h1>
-
-      {demoState.error && (
-        <div className="error-message">
-          <p>Error: {demoState.error}</p>
-          <button
-            onClick={() => window.location.reload()}
-            style={{
-              padding: "8px 16px",
-              backgroundColor: "#2196f3",
-              color: "white",
-              border: "none",
-              borderRadius: "4px",
-              cursor: "pointer",
-            }}
-          >
-            Reload page
-          </button>
-        </div>
-      )}
-
-      <div className="demo-container" style={{ marginTop: "2rem" }}>
-        {demoState.isLoaded ? (
-          <Player
-            sessionId={DEMO_SESSION_ID}
-            autoPlay={true}
-            initialData={demoState.data}
-          />
-        ) : !demoState.error ? (
-          <div
-            className="loader"
-            style={{
-              padding: "1rem",
-              border: "1px solid #ddd",
-              borderRadius: "4px",
-            }}
-          >
-            Loading DEMO...
-          </div>
-        ) : null}
+    <div style={{ padding: "1rem" }}>
+      <h1>My Recording & Playback App</h1>
+      {/* 1) Recorder control */}
+      <div style={{ marginBottom: "1rem" }}>
+        <RecorderButton />
       </div>
-      <button
-        onClick={() => {
-          const recorder = new Recorder();
-          recorder.start();
-          console.log("Recorder started:", recorder.sessionId);
-        }}
-      >
-        Start Recording
-      </button>
+
+      {/* 2) List or dropdown to select existing sessions */}
+      <SessionSelector sessions={sessions} onSelect={handleSessionSelect} />
+
+      {/* 3) The player for the chosen session */}
+      {currentSession ? (
+        <div style={{ marginTop: "1rem" }}>
+          <Player
+            events={currentSession.events}
+            domSnapshot={currentSession.domSnapshot}
+          />
+        </div>
+      ) : (
+        <p>Select a session above or record a new one.</p>
+      )}
     </div>
   );
 }

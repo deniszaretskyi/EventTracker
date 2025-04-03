@@ -1,124 +1,29 @@
-import { initMouseListeners, initMutationObserver } from "./eventHandlers.js";
+// src/recorder/userRecorder.js
 import { encode } from "@msgpack/msgpack";
-import { maskSensitiveFields } from "../utils/maskData";
-import { serializeNode, getNodeIdentifier } from "./domUtils";
-import { throttle } from "../utils/helpers";
+import { initMouseListeners, initMutationObserver } from "./eventHandlers";
 
+/**
+ * Recorder class is responsible for capturing user interactions (mouse/mutations)
+ * and then uploading them (with a DOM snapshot) to the server.
+ *
+ * Key points in this implementation:
+ * - We store a 'startTime' when recording begins.
+ * - Every event gets a relative 'timestamp' = performance.now() - startTime.
+ * - On stop, we save the total duration in metadata.duration.
+ */
 export class Recorder {
   constructor() {
-    this.events = [];
-    this.domSnapshot = null;
-    this.worker = null;
     this.isRecording = false;
+    this.startTime = null; // Will store the performance.now() at start
+    this.sessionId = null;
+    this.events = [];
     this.cleanupCallbacks = [];
-    this.sessionId = crypto.randomUUID();
-    this.pendingMutations = [];
-    this.eventBuffer = [];
-    this.lastFlush = Date.now();
-
-    // Привязка контекста
-    this.handleEvent = this.handleEvent.bind(this);
-    this.flushMutations = throttle(this._flushMutations.bind(this), 200);
-    this.handleWorkerMessage = this.handleWorkerMessage.bind(this);
-
-    // Web Worker
-    if (window.Worker) {
-      this.worker = new Worker(
-        new URL("../../public/workers/serializer.worker.js", import.meta.url),
-        { type: "module" }
-      );
-      this.worker.onmessage = this.handleWorkerMessage;
-    }
-
-    this.takeDOMSnapshot();
   }
 
-  takeDOMSnapshot() {
-    try {
-      this.domSnapshot = serializeNode(document.documentElement);
-      console.debug("[Recorder] DOM snapshot created");
-    } catch (error) {
-      console.error("[Recorder] DOM snapshot error:", error);
-    }
-  }
-
-  handleWorkerMessage(event) {
-    if (!event.data || !this.isRecording) return;
-
-    const payload = {
-      events: this.eventBuffer,
-      domSnapshot: this.domSnapshot,
-      metadata: {
-        sessionId: this.sessionId,
-        userAgent: navigator.userAgent,
-        screen: `${window.screen.width}x${window.screen.height}`,
-        timestamp: Date.now(),
-      },
-    };
-
-    this.uploadToServer(payload);
-    this.eventBuffer = [];
-  }
-
-  uploadToServer(data) {
-    if (!data || data.events.length === 0) return;
-
-    const encoded = encode(data);
-
-    fetch("http://localhost:3001/api/record", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/msgpack",
-        "X-Session-ID": this.sessionId,
-      },
-      body: encode(data),
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        console.debug("[Recorder] Data uploaded");
-      })
-      .catch((error) => {
-        console.error("[Recorder] Upload failed:", error.message);
-      });
-  }
-
-  handleEvent(event) {
-    if (!this.isRecording) return;
-
-    const processedEvent = {
-      ...event,
-      sessionId: this.sessionId,
-      timestamp: performance.now(),
-    };
-
-    this.eventBuffer.push(processedEvent);
-
-    // 50 events in 1 sec
-    if (
-      this.eventBuffer.length >= 50 ||
-      performance.now() - this.lastFlush > 1000
-    ) {
-      this.worker?.postMessage(this.eventBuffer);
-      this.lastFlush = performance.now();
-    }
-  }
-
-  _flushMutations() {
-    if (!Array.isArray(this.pendingMutations)) {
-      console.warn("Invalid mutations format");
-      this.pendingMutations = [];
-      return;
-    }
-
-    const mutations = [...this.pendingMutations];
-    this.handleEvent({
-      type: "mutation",
-      mutations,
-      timestamp: performance.now(),
-    });
-    this.pendingMutations = [];
-  }
-
+  /**
+   * Start recording a new session. Generates a new sessionId
+   * and initializes event listeners (mouse, mutations, etc.).
+   */
   start() {
     if (this.isRecording) {
       console.warn("[Recorder] Already recording");
@@ -126,36 +31,104 @@ export class Recorder {
     }
 
     this.isRecording = true;
-    maskSensitiveFields();
+    this.startTime = performance.now(); // Mark the start
+    this.sessionId = crypto.randomUUID();
 
-    this.cleanupCallbacks = [
-      initMouseListeners(this.handleEvent),
-      initMutationObserver((mutations) => {
-        if (Array.isArray(mutations)) {
-          this.pendingMutations.push(...mutations);
-        }
-        this.flushMutations();
-      }),
-    ];
+    console.log(`[Recorder] Started recording. sessionId=${this.sessionId}`);
 
-    console.log(`[Recorder] Started (${this.sessionId})`);
+    // Listen to mouse (move, click, etc.)
+    const stopMouse = initMouseListeners((event) => {
+      // Store each event with a timestamp relative to startTime
+      const relativeTime = performance.now() - this.startTime;
+      this.events.push({
+        ...event,
+        timestamp: relativeTime,
+        sessionId: this.sessionId,
+      });
+    });
+
+    // Listen to DOM mutations
+    const stopMutations = initMutationObserver((mutationRecords) => {
+      const relativeTime = performance.now() - this.startTime;
+      this.events.push({
+        type: "mutation",
+        sessionId: this.sessionId,
+        timestamp: relativeTime,
+        mutations: mutationRecords,
+      });
+    });
+
+    // We'll keep references to these cleanup functions
+    // so that we can remove the listeners later.
+    this.cleanupCallbacks = [stopMouse, stopMutations];
   }
 
+  /**
+   * Stop the recording, gather the data, and send it to the server.
+   */
   stop() {
-    if (!this.isRecording) return;
-
-    this.isRecording = false;
-    this.cleanupCallbacks.forEach((fn) => fn?.());
-
-    if (this.eventBuffer.length > 0) {
-      this.worker?.postMessage(this.eventBuffer);
+    if (!this.isRecording) {
+      console.warn("[Recorder] Called stop() but was not recording.");
+      return;
     }
-    this._flushMutations();
+    this.isRecording = false;
+
+    // Calculate the actual full duration of the recording
+    const fullTime = performance.now() - this.startTime;
+
+    console.log(
+      `[Recorder] Stopped. Total events=${this.events.length}, duration=${(fullTime / 1000).toFixed(1)}s`
+    );
+
+    // Clean up all event listeners
+    this.cleanupCallbacks.forEach((fn) => fn && fn());
+    this.cleanupCallbacks = [];
+
+    // Here we can serialize the DOM or just store a placeholder
+    // for demonstration purposes:
+    const domSnapshot = "<html><body>Recorded Snapshot</body></html>";
+
+    // Prepare payload for uploading
+    const payload = {
+      sessionId: this.sessionId,
+      events: this.events,
+      domSnapshot: domSnapshot,
+      metadata: {
+        userAgent: window.navigator.userAgent || "",
+        timestamp: Date.now(), // typical "real world" time
+        duration: fullTime, // total length in milliseconds
+      },
+    };
+
+    this.uploadToServer(payload);
+
+    // Clear memory
+    this.events = [];
+    this.startTime = null;
+    this.sessionId = null;
   }
 
-  destroy() {
-    this.stop();
-    this.worker?.terminate();
-    this.cleanupCallbacks = [];
+  /**
+   * Actually send the recorded data to the server, encoded with msgpack.
+   */
+  uploadToServer(data) {
+    const encoded = encode(data);
+
+    fetch("http://localhost:3001/api/record", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/msgpack",
+      },
+      body: encoded,
+    })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Server error: ${res.status}`);
+        }
+        console.log("[Recorder] Data successfully uploaded to server.");
+      })
+      .catch((err) => {
+        console.error("[Recorder] Upload failed:", err);
+      });
   }
 }

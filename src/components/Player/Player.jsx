@@ -1,247 +1,218 @@
+// Project/src/components/Player/Player.jsx
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   rebuildDOM,
   applyBatchedMutations,
 } from "../../utils/domReconstructor";
-import { Cursor } from "./Cursor";
-import { Controls } from "./Controls";
 
-export const Player = ({ sessionId, autoPlay = false, initialData }) => {
-  const [playbackState, setPlaybackState] = useState({
-    isPlaying: false,
-    currentTime: 0,
-    speed: 1.0,
-    duration: 0,
-  });
-
-  const [loadingState, setLoadingState] = useState({
-    status: "idle",
-    error: null,
-  });
+/**
+ * Player component is responsible for taking:
+ * - an array of recorded events
+ * - a DOM snapshot
+ * and replaying them in an iframe.
+ *
+ * Key changes:
+ * - We rely on `metadata.duration` to determine the total session length (in ms).
+ * - We apply events by their timestamps, but the playback loop continues
+ *   until the "duration" time is reached, even if the last event is earlier.
+ */
+export default function Player({ events, domSnapshot }) {
+  const [status, setStatus] = useState("idle"); // "idle" | "loading" | "ready" | "error"
+  const [error, setError] = useState(null);
+  const [currentTime, setCurrentTime] = useState(0); // in seconds
+  const [duration, setDuration] = useState(0); // in seconds
 
   const iframeRef = useRef(null);
-  const eventsQueue = useRef([]);
-  const rafId = useRef(null);
-  const startTimestamp = useRef(0);
-  const playbackStateRef = useRef(playbackState);
   const containerRef = useRef(null);
-  const initAttempts = useRef(0);
-  const retryTimeout = useRef(null);
+  const rafId = useRef(null);
+  const startTimestamp = useRef(null); // used in playback loop
+  const isPlayingRef = useRef(false); // track playback state
+  const eventsQueueRef = useRef([]); // copy of events to apply
 
+  // 1) Create/attach iframe on mount
   useEffect(() => {
-    playbackStateRef.current = playbackState;
-  }, [playbackState]);
+    setStatus("loading");
 
-  const initIframe = useCallback((dom) => {
-    const MAX_ATTEMPTS = 5;
-    const BASE_DELAY = 300;
-    setLoadingState({ status: "loading", error: null });
-
-    const cleanup = () => {
-      if (iframeRef.current) {
-        containerRef.current?.removeChild(iframeRef.current);
-        iframeRef.current = null;
-      }
-      clearTimeout(retryTimeout.current);
-    };
-
-    const initialize = () => {
-      cleanup();
-      initAttempts.current = 0;
-
-      try {
-        if (!containerRef.current) throw new Error("Контейнер не найден");
-
-        iframeRef.current = document.createElement("iframe");
-        iframeRef.current.className = "session-iframe";
-        iframeRef.current.sandbox = "allow-scripts";
-        iframeRef.current.style.cssText = `
-          visibility: hidden;
-          width: 100%;
-          height: 100%;
-          border: none;
-        `;
-
-        // Обработчики событий iframe
-        iframeRef.current.onload = () => handleIframeLoad(dom);
-        iframeRef.current.onerror = () => handleError("Ошибка загрузки iframe");
-
-        containerRef.current.appendChild(iframeRef.current);
-      } catch (error) {
-        handleError(error.message);
-      }
-    };
-
-    const handleIframeLoad = (dom) => {
-      try {
-        const doc = iframeRef.current.contentDocument;
-        if (!doc) throw new Error("Документ не доступен");
-
-        doc.open();
-        doc.write(`
-          <!DOCTYPE html>
-          <html>
-            <head>
-              <meta http-equiv="Content-Security-Policy" content="default-src 'self'">
-              <style>
-                html, body { margin: 0; overflow: hidden; width: 100%; height: 100%; }
-                .replayer-mouse {
-                  position: absolute;
-                  width: 15px;
-                  height: 15px;
-                  background: #ff0000;
-                  border-radius: 50%;
-                  pointer-events: none;
-                  transition: transform 0.05s linear;
-                  z-index: 9999;
-                }
-              </style>
-            </head>
-            <body></body>
-          </html>
-        `);
-        doc.close();
-
-        setTimeout(() => {
-          if (doc.body) {
-            rebuildDOM(dom, doc);
-            iframeRef.current.style.visibility = "visible";
-            setLoadingState({ status: "ready", error: null });
-          }
-        }, 100);
-      } catch (error) {
-        handleError(`Ошибка контента: ${error.message}`);
-      }
-    };
-
-    const handleError = (message) => {
-      if (initAttempts.current < MAX_ATTEMPTS) {
-        initAttempts.current += 1;
-        retryTimeout.current = setTimeout(
-          initialize,
-          BASE_DELAY * initAttempts.current
-        );
-      } else {
-        setLoadingState({ status: "error", error: message });
-        cleanup();
-      }
-    };
-
-    initialize();
-
-    return cleanup;
-  }, []);
-
-  useEffect(() => {
-    if (!initialData?.dom || !initialData?.events) return;
-
-    // Валидация данных
-    const isValid = initialData.events.every(
-      (e) =>
-        e.timestamp !== undefined &&
-        ["mousemove", "click", "mutation"].includes(e.type) &&
-        (e.type !== "mousemove" ||
-          (typeof e.x === "number" && typeof e.y === "number"))
-    );
-
-    if (!isValid) {
-      setLoadingState({ status: "error", error: "Неверный формат данных" });
-      return;
+    // If there's an existing iframe, remove it
+    if (iframeRef.current) {
+      containerRef.current.removeChild(iframeRef.current);
+      iframeRef.current = null;
     }
 
-    eventsQueue.current = [...initialData.events].sort(
-      (a, b) => a.timestamp - b.timestamp
-    );
-    setPlaybackState((prev) => ({
-      ...prev,
-      duration:
-        eventsQueue.current.length > 0
-          ? (eventsQueue.current.slice(-1)[0].timestamp -
-              eventsQueue.current[0].timestamp) /
-            1000
-          : 0,
-    }));
+    // Create a new iframe
+    const iframe = document.createElement("iframe");
+    iframe.sandbox = "allow-scripts allow-same-origin";
+    iframe.style.cssText = "width:100%; height:600px; border:none;";
+    iframe.onload = () => handleIframeLoad();
+    iframe.onerror = () => handleError("Iframe failed to load");
+    containerRef.current.appendChild(iframe);
+    iframeRef.current = iframe;
 
-    initIframe(initialData.dom);
-
+    // Cleanup on unmount
     return () => {
-      if (iframeRef.current) {
-        containerRef.current?.removeChild(iframeRef.current);
+      if (iframeRef.current && containerRef.current) {
+        containerRef.current.removeChild(iframeRef.current);
         iframeRef.current = null;
       }
     };
-  }, [initialData, initIframe]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount
 
-  // Play logic
-  const playbackLoop = useCallback((timestamp) => {
-    if (!playbackStateRef.current.isPlaying || !iframeRef.current) return;
+  // 2) Called once iframe finishes loading
+  const handleIframeLoad = () => {
+    try {
+      const doc = iframeRef.current.contentDocument;
+      doc.open();
+      doc.write(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <style>
+              html, body {
+                margin: 0; 
+                padding: 0; 
+                overflow: hidden;
+              }
+              .replayer-mouse {
+                position: absolute;
+                width: 15px;
+                height: 15px;
+                background: #f00;
+                border-radius: 50%;
+                pointer-events: none;
+                transition: transform 0.05s linear;
+                z-index: 9999;
+              }
+            </style>
+          </head>
+          <body></body>
+        </html>
+      `);
+      doc.close();
 
-    if (!startTimestamp.current) {
-      startTimestamp.current =
-        timestamp - playbackStateRef.current.currentTime * 1000;
-    }
-
-    const elapsed =
-      (timestamp - startTimestamp.current) * playbackStateRef.current.speed;
-    const currentTime = Math.min(
-      elapsed / 1000,
-      playbackStateRef.current.duration
-    );
-
-    setPlaybackState((prev) => ({
-      ...prev,
-      currentTime: currentTime,
-    }));
-
-    const targetTimestamp = eventsQueue.current[0]?.timestamp + elapsed;
-    const currentEvents = eventsQueue.current.filter(
-      (e) => e.timestamp <= targetTimestamp
-    );
-
-    if (currentEvents.length > 0) {
-      processEvents(currentEvents);
-      eventsQueue.current = eventsQueue.current.filter(
-        (e) => e.timestamp > targetTimestamp
-      );
-    }
-
-    if (currentTime < playbackStateRef.current.duration) {
-      rafId.current = requestAnimationFrame(playbackLoop);
-    } else {
-      setPlaybackState((prev) => ({ ...prev, isPlaying: false }));
-    }
-  }, []);
-
-  // Event handler
-  const processEvents = useCallback((events) => {
-    const doc = iframeRef.current?.contentDocument;
-    if (!doc) return;
-
-    events.forEach((event) => {
-      try {
-        switch (event.type) {
-          case "mousemove":
-            updateCursor(doc, event.x, event.y);
-            break;
-
-          case "click":
-            simulateClick(doc, event.x, event.y);
-            break;
-
-          case "mutation":
-            applyBatchedMutations(event.mutations, doc);
-            break;
-
-          case "scroll":
-            doc.defaultView?.scrollTo(event.scrollX, event.scrollY);
-            break;
+      // Give the iframe a little time to finalize DOM
+      setTimeout(() => {
+        if (!doc.body) {
+          handleError("Iframe doc.body not found");
+          return;
         }
-      } catch (error) {
-        console.error("Error event handling:", event.type, error);
-      }
-    });
-  }, []);
 
+        // Rebuild the recorded DOM from the snapshot
+        if (domSnapshot) {
+          rebuildDOM(domSnapshot, doc);
+          setStatus("ready");
+          setError(null);
+
+          // Prepare events & set total duration
+          if (events && events.length > 0) {
+            // Sort events by timestamp (should already be in order, but just to be sure)
+            events.sort((a, b) => a.timestamp - b.timestamp);
+            eventsQueueRef.current = [...events];
+
+            // (A) If we have metadata.duration, use it
+            // (B) Otherwise, fallback to lastEvent.timestamp - firstEvent.timestamp
+            const totalMsFromMetadata = domSnapshot?.metadata?.duration;
+            if (
+              typeof totalMsFromMetadata === "number" &&
+              totalMsFromMetadata > 0
+            ) {
+              setDuration(totalMsFromMetadata / 1000);
+            } else {
+              const firstT = events[0].timestamp;
+              const lastT = events[events.length - 1].timestamp;
+              setDuration((lastT - firstT) / 1000);
+            }
+          }
+        } else {
+          handleError("No domSnapshot found in props");
+        }
+      }, 100);
+    } catch (err) {
+      handleError("Iframe write error: " + err.message);
+    }
+  };
+
+  const handleError = (msg) => {
+    console.error("[Player] error:", msg);
+    setStatus("error");
+    setError(msg);
+  };
+
+  /**
+   * The main playback loop, scheduled via requestAnimationFrame.
+   * It calculates how much time has elapsed since we pressed "Play"
+   * and updates currentTime (in seconds). Also, applies any events
+   * whose timestamps fall into that time.
+   */
+  const playbackLoop = useCallback(
+    (timestamp) => {
+      if (!isPlayingRef.current) return;
+
+      // init start time
+      if (!startTimestamp.current) {
+        // "timestamp" is the time of the current animation frame
+        // We'll set startTimestamp so that "elapsed" starts from 0.
+        startTimestamp.current = timestamp - currentTime * 1000;
+      }
+
+      // elapsed (ms) = current animationFrame time minus our "start"
+      const elapsed = timestamp - startTimestamp.current;
+      const newTime = elapsed / 1000; // in seconds
+      setCurrentTime(newTime);
+
+      // apply events that have timestamp <= "elapsed"
+      const doc = iframeRef.current?.contentDocument;
+      if (doc) {
+        const playableEvents = eventsQueueRef.current.filter(
+          (e) => e.timestamp <= elapsed
+        );
+        // apply them
+        playableEvents.forEach((ev) => applyEvent(ev, doc));
+        // remove from queue
+        eventsQueueRef.current = eventsQueueRef.current.filter(
+          (e) => e.timestamp > elapsed
+        );
+      }
+
+      // If we haven't yet reached the full duration, schedule next frame
+      if (newTime < duration) {
+        rafId.current = requestAnimationFrame(playbackLoop);
+      } else {
+        // End of playback
+        console.log("[Player] playback finished");
+        isPlayingRef.current = false;
+        setCurrentTime(duration);
+      }
+    },
+    [duration, currentTime]
+  );
+
+  /**
+   * Dispatch a single event into the iframe.
+   * For example, updating the mouse position or applying DOM mutations.
+   */
+  const applyEvent = (event, doc) => {
+    try {
+      switch (event.type) {
+        case "mousemove":
+          updateCursor(doc, event.x, event.y);
+          break;
+        case "click":
+          simulateClick(doc, event.x, event.y);
+          break;
+        case "mutation":
+          applyBatchedMutations(event.mutations, doc);
+          break;
+        default:
+          // no-op or handle more event types here
+          break;
+      }
+    } catch (error) {
+      console.error("[Player] Error applying event:", event, error);
+    }
+  };
+
+  // Moves the "replayer-mouse" element inside the iframe to x,y
   const updateCursor = (doc, x, y) => {
     let cursor = doc.querySelector(".replayer-mouse");
     if (!cursor) {
@@ -252,106 +223,60 @@ export const Player = ({ sessionId, autoPlay = false, initialData }) => {
     cursor.style.transform = `translate(${x}px, ${y}px)`;
   };
 
+  // Simulate a user click in the iframe
   const simulateClick = (doc, x, y) => {
-    const element = doc.elementFromPoint(x, y);
-    if (element) {
-      element.dispatchEvent(
-        new MouseEvent("click", {
-          bubbles: true,
-          clientX: x,
-          clientY: y,
-        })
+    const el = doc.elementFromPoint(x, y);
+    if (el) {
+      el.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, clientX: x, clientY: y })
       );
     }
   };
 
-  // Play pause
-  const handlePlayPause = useCallback(() => {
-    setPlaybackState((prev) => {
-      const newIsPlaying = !prev.isPlaying;
+  // Public controls
+  const handlePlay = () => {
+    if (status !== "ready") {
+      console.warn("[Player] Not ready to play");
+      return;
+    }
+    // Reset internal state for new playback
+    isPlayingRef.current = true;
+    startTimestamp.current = null;
+    // Refill the events queue so we replay from the start
+    eventsQueueRef.current = [...events];
+    // Sort them by timestamp again, just in case
+    eventsQueueRef.current.sort((a, b) => a.timestamp - b.timestamp);
 
-      if (newIsPlaying) {
-        eventsQueue.current = [...initialData.events].sort(
-          (a, b) => a.timestamp - b.timestamp
-        );
-        startTimestamp.current = performance.now() - prev.currentTime * 1000;
-        rafId.current = requestAnimationFrame(playbackLoop);
-      } else {
-        cancelAnimationFrame(rafId.current);
-      }
+    // Reset current time to 0
+    setCurrentTime(0);
 
-      return { ...prev, isPlaying: newIsPlaying };
-    });
-  }, [initialData?.events, playbackLoop]);
+    // Start the animation loop
+    rafId.current = requestAnimationFrame(playbackLoop);
+  };
 
-  const handleSeek = useCallback(
-    (delta) => {
-      setPlaybackState((prev) => {
-        const newTime = Math.max(
-          0,
-          Math.min(prev.currentTime + delta, prev.duration)
-        );
-
-        eventsQueue.current = [...initialData.events]
-          .filter(
-            (e) =>
-              e.timestamp >= initialData.events[0].timestamp + newTime * 1000
-          )
-          .sort((a, b) => a.timestamp - b.timestamp);
-
-        startTimestamp.current = performance.now() - newTime * 1000;
-        return { ...prev, currentTime: newTime };
-      });
-    },
-    [initialData?.events]
-  );
+  const handlePause = () => {
+    isPlayingRef.current = false;
+    cancelAnimationFrame(rafId.current);
+  };
 
   return (
-    <div className="player-container" ref={containerRef}>
-      <div
-        className="iframe-wrapper"
-        style={{ width: "100%", height: "600px" }}
-      >
-        {loadingState.status === "error" && (
-          <div className="error-overlay">
-            <h3>PlayBack Error</h3>
-            <p>{loadingState.error}</p>
-            <button
-              onClick={() => initIframe(initialData.dom)}
-              className="retry-button"
-            >
-              Try again
-            </button>
-          </div>
-        )}
-
-        {loadingState.status === "loading" && (
-          <div className="loading-overlay">
-            <div className="loader-spinner" />
-            <p>Loading session...</p>
-          </div>
-        )}
-
-        {loadingState.status === "ready" && initialData && (
-          <Cursor
-            events={initialData.events.filter((e) => e.type === "mousemove")}
-            currentTime={playbackState.currentTime}
-          />
-        )}
+    <div style={{ border: "1px solid #ccc", padding: "1rem" }}>
+      <div ref={containerRef} style={{ width: "100%", height: "600px" }}>
+        {status === "loading" && <p>Loading session...</p>}
+        {status === "error" && <p style={{ color: "red" }}>Error: {error}</p>}
       </div>
 
-      <Controls
-        isPlaying={playbackState.isPlaying}
-        duration={playbackState.duration}
-        currentTime={playbackState.currentTime}
-        playbackSpeed={playbackState.speed}
-        onPlayPause={handlePlayPause}
-        onSeek={handleSeek}
-        onSpeedChange={(speed) =>
-          setPlaybackState((prev) => ({ ...prev, speed }))
-        }
-        disabled={loadingState.status !== "ready"}
-      />
+      <div style={{ marginTop: "1rem" }}>
+        <button onClick={handlePlay} disabled={status !== "ready"}>
+          Play
+        </button>
+        <button onClick={handlePause} disabled={status !== "ready"}>
+          Pause
+        </button>
+        <span style={{ marginLeft: "1rem" }}>
+          Time: {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
+        </span>
+      </div>
     </div>
   );
-};
+}
