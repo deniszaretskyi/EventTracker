@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import RecorderButton from "./components/RecorderButton";
 import SessionSelector from "./components/SessionSelector";
 import Player from "./components/Player/Player";
+import "./App.css";
 
 export default function App() {
   const [sessions, setSessions] = useState([]);

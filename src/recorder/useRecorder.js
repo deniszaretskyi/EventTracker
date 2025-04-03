@@ -1,115 +1,112 @@
-// src/recorder/userRecorder.js
+/**
+ *
+ * Recorder class that captures user interactions (mousemove, click, mutations)
+ * plus a DOM snapshot, and sends them to the server. Now it also captures
+ * viewport dimensions to enable coordinate scaling in the player.
+ */
+
 import { encode } from "@msgpack/msgpack";
 import { initMouseListeners, initMutationObserver } from "./eventHandlers";
+import { serializeNode } from "../utils/domSnapshot";
 
-/**
- * Recorder class is responsible for capturing user interactions (mouse/mutations)
- * and then uploading them (with a DOM snapshot) to the server.
- *
- * Key points in this implementation:
- * - We store a 'startTime' when recording begins.
- * - Every event gets a relative 'timestamp' = performance.now() - startTime.
- * - On stop, we save the total duration in metadata.duration.
- */
 export class Recorder {
   constructor() {
     this.isRecording = false;
-    this.startTime = null; // Will store the performance.now() at start
+    this.startTime = null;
     this.sessionId = null;
     this.events = [];
     this.cleanupCallbacks = [];
   }
 
   /**
-   * Start recording a new session. Generates a new sessionId
-   * and initializes event listeners (mouse, mutations, etc.).
+   * Start the recording:
+   * - sets sessionId
+   * - attaches listeners for mouse & DOM mutations
+   * - remembers the initial viewport size (innerWidth/innerHeight)
    */
   start() {
     if (this.isRecording) {
-      console.warn("[Recorder] Already recording");
+      console.warn("[Recorder] Already recording.");
       return;
     }
-
     this.isRecording = true;
-    this.startTime = performance.now(); // Mark the start
+    this.startTime = performance.now();
     this.sessionId = crypto.randomUUID();
+    this.events = [];
+    this.cleanupCallbacks = [];
 
-    console.log(`[Recorder] Started recording. sessionId=${this.sessionId}`);
+    console.log(`[Recorder] Recording started. sessionId=${this.sessionId}`);
 
-    // Listen to mouse (move, click, etc.)
+    // Capture mouse events
     const stopMouse = initMouseListeners((event) => {
-      // Store each event with a timestamp relative to startTime
-      const relativeTime = performance.now() - this.startTime;
       this.events.push({
         ...event,
-        timestamp: relativeTime,
         sessionId: this.sessionId,
+        timestamp: performance.now() - this.startTime,
       });
     });
 
-    // Listen to DOM mutations
+    // Capture DOM mutations
     const stopMutations = initMutationObserver((mutationRecords) => {
-      const relativeTime = performance.now() - this.startTime;
       this.events.push({
         type: "mutation",
         sessionId: this.sessionId,
-        timestamp: relativeTime,
+        timestamp: performance.now() - this.startTime,
         mutations: mutationRecords,
       });
     });
 
-    // We'll keep references to these cleanup functions
-    // so that we can remove the listeners later.
     this.cleanupCallbacks = [stopMouse, stopMutations];
   }
 
   /**
-   * Stop the recording, gather the data, and send it to the server.
+   * Stop recording, build the payload, and upload it to the server.
+   * Adds viewport size to metadata so the player can scale coordinates.
    */
   stop() {
     if (!this.isRecording) {
-      console.warn("[Recorder] Called stop() but was not recording.");
+      console.warn("[Recorder] stop() called but was not recording.");
       return;
     }
     this.isRecording = false;
 
-    // Calculate the actual full duration of the recording
     const fullTime = performance.now() - this.startTime;
-
     console.log(
-      `[Recorder] Stopped. Total events=${this.events.length}, duration=${(fullTime / 1000).toFixed(1)}s`
+      `[Recorder] Stopped. Duration=${fullTime.toFixed(1)} ms, Events=${this.events.length}`
     );
 
-    // Clean up all event listeners
-    this.cleanupCallbacks.forEach((fn) => fn && fn());
+    // Cleanup
+    this.cleanupCallbacks.forEach((cb) => cb && cb());
     this.cleanupCallbacks = [];
 
-    // Here we can serialize the DOM or just store a placeholder
-    // for demonstration purposes:
-    const domSnapshot = "<html><body>Recorded Snapshot</body></html>";
+    // Serialize entire DOM as JSON
+    const domSnapshot = serializeNode(document.documentElement);
 
-    // Prepare payload for uploading
+    // Build payload
     const payload = {
       sessionId: this.sessionId,
       events: this.events,
-      domSnapshot: domSnapshot,
+      domSnapshot,
       metadata: {
-        userAgent: window.navigator.userAgent || "",
-        timestamp: Date.now(), // typical "real world" time
-        duration: fullTime, // total length in milliseconds
+        userAgent: navigator.userAgent || "",
+        timestamp: Date.now(),
+        duration: fullTime,
+
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
       },
     };
 
     this.uploadToServer(payload);
 
-    // Clear memory
+    // Reset
     this.events = [];
     this.startTime = null;
     this.sessionId = null;
   }
 
   /**
-   * Actually send the recorded data to the server, encoded with msgpack.
+   * Encode payload with msgpack and POST it to /api/record
    */
   uploadToServer(data) {
     const encoded = encode(data);
@@ -125,7 +122,7 @@ export class Recorder {
         if (!res.ok) {
           throw new Error(`Server error: ${res.status}`);
         }
-        console.log("[Recorder] Data successfully uploaded to server.");
+        console.log("[Recorder] Data uploaded successfully.");
       })
       .catch((err) => {
         console.error("[Recorder] Upload failed:", err);

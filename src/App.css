@@ -40,3 +40,13 @@
 .read-the-docs {
   color: #888;
 }
+.replayer-mouse {
+  position: absolute;
+  width: 15px;
+  height: 15px;
+  background: red;
+  border-radius: 50%;
+  pointer-events: none;
+  transition: transform 0.05s linear;
+  z-index: 9999;
+}
