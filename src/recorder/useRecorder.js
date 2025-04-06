@@ -1,12 +1,11 @@
 /**
+ * Project/src/recorder/userRecorder.js
  *
- * Recorder class that captures user interactions (mousemove, click, mutations)
- * plus a DOM snapshot, and sends them to the server. Now it also captures
- * viewport dimensions to enable coordinate scaling in the player.
+ * - Используем e.pageX / e.pageY для мыши.
+ * - Сериализуем DOM, включая <link> / <style>.
  */
 
 import { encode } from "@msgpack/msgpack";
-import { initMouseListeners, initMutationObserver } from "./eventHandlers";
 import { serializeNode } from "../utils/domSnapshot";
 
 export class Recorder {
@@ -18,12 +17,6 @@ export class Recorder {
     this.cleanupCallbacks = [];
   }
 
-  /**
-   * Start the recording:
-   * - sets sessionId
-   * - attaches listeners for mouse & DOM mutations
-   * - remembers the initial viewport size (innerWidth/innerHeight)
-   */
   start() {
     if (this.isRecording) {
       console.warn("[Recorder] Already recording.");
@@ -35,34 +28,47 @@ export class Recorder {
     this.events = [];
     this.cleanupCallbacks = [];
 
-    console.log(`[Recorder] Recording started. sessionId=${this.sessionId}`);
-
-    // Capture mouse events
-    const stopMouse = initMouseListeners((event) => {
+    // Mouse
+    const handleMouseMove = (e) => {
       this.events.push({
-        ...event,
-        sessionId: this.sessionId,
+        type: "mousemove",
+        x: e.pageX,
+        y: e.pageY,
         timestamp: performance.now() - this.startTime,
       });
-    });
-
-    // Capture DOM mutations
-    const stopMutations = initMutationObserver((mutationRecords) => {
+    };
+    const handleClick = (e) => {
       this.events.push({
-        type: "mutation",
-        sessionId: this.sessionId,
+        type: "click",
+        x: e.pageX,
+        y: e.pageY,
         timestamp: performance.now() - this.startTime,
-        mutations: mutationRecords,
       });
+    };
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("click", handleClick);
+
+    // Scroll (window)
+    const handleScroll = () => {
+      this.events.push({
+        type: "scroll",
+        scrollX: window.scrollX,
+        scrollY: window.scrollY,
+        timestamp: performance.now() - this.startTime,
+      });
+    };
+    window.addEventListener("scroll", handleScroll);
+
+    // Cleanup
+    this.cleanupCallbacks.push(() => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("click", handleClick);
+      window.removeEventListener("scroll", handleScroll);
     });
 
-    this.cleanupCallbacks = [stopMouse, stopMutations];
+    console.log("[Recorder] Started, sessionId =", this.sessionId);
   }
 
-  /**
-   * Stop recording, build the payload, and upload it to the server.
-   * Adds viewport size to metadata so the player can scale coordinates.
-   */
   stop() {
     if (!this.isRecording) {
       console.warn("[Recorder] stop() called but was not recording.");
@@ -72,17 +78,16 @@ export class Recorder {
 
     const fullTime = performance.now() - this.startTime;
     console.log(
-      `[Recorder] Stopped. Duration=${fullTime.toFixed(1)} ms, Events=${this.events.length}`
+      `[Recorder] Stopped. Duration=${fullTime.toFixed(1)}ms, Events=${this.events.length}`
     );
 
     // Cleanup
-    this.cleanupCallbacks.forEach((cb) => cb && cb());
+    this.cleanupCallbacks.forEach((fn) => fn && fn());
     this.cleanupCallbacks = [];
 
-    // Serialize entire DOM as JSON
+    // Serialize DOM (including <head>, <style>, <link>)
     const domSnapshot = serializeNode(document.documentElement);
 
-    // Build payload
     const payload = {
       sessionId: this.sessionId,
       events: this.events,
@@ -91,7 +96,7 @@ export class Recorder {
         userAgent: navigator.userAgent || "",
         timestamp: Date.now(),
         duration: fullTime,
-
+        // record viewport
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
       },
@@ -99,18 +104,14 @@ export class Recorder {
 
     this.uploadToServer(payload);
 
-    // Reset
+    // reset
     this.events = [];
     this.startTime = null;
     this.sessionId = null;
   }
 
-  /**
-   * Encode payload with msgpack and POST it to /api/record
-   */
   uploadToServer(data) {
     const encoded = encode(data);
-
     fetch("http://localhost:3001/api/record", {
       method: "POST",
       headers: {
@@ -122,7 +123,7 @@ export class Recorder {
         if (!res.ok) {
           throw new Error(`Server error: ${res.status}`);
         }
-        console.log("[Recorder] Data uploaded successfully.");
+        console.log("[Recorder] Data uploaded successfully");
       })
       .catch((err) => {
         console.error("[Recorder] Upload failed:", err);
